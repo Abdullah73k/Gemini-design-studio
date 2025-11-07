@@ -7,7 +7,7 @@ export default function HomePage() {
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-10">
         <header className="space-y-4 text-center md:text-left">
           <p className="text-xs uppercase tracking-[0.6em] text-slate-400">
-            Gemini layout studio
+            Gemini design studio
           </p>
           <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
             Dream, prompt, and stage interiors in minutes
