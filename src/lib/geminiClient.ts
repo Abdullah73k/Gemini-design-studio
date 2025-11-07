@@ -4,6 +4,7 @@ import type { LayoutResponse, ModelMeta, ModelsJson } from "../types/models";
 
 type ModelId = keyof ModelsJson;
 
+// Use a widely available default model. Alternatives: "models/gemini-1.5-pro", "models/gemini-1.5-flash-8b".
 const DEFAULT_MODEL = "gemini-2.0-flash";
 const DEFAULT_TEMPERATURE = 0.7;
 
@@ -85,12 +86,19 @@ export async function callGemini(
 
 		return text;
 	} catch (error) {
-		console.error("[geminiClient] Gemini invocation failed.", {
-			message: (error as Error).message,
-			model: modelName,
-		});
-		throw new Error("Failed to generate layout. Verify Gemini configuration.");
-	}
+    const err = error as Error & { status?: number; code?: string; cause?: unknown };
+    console.error("[geminiClient] Gemini invocation failed.", {
+      message: err?.message,
+      code: (err as any)?.code,
+      status: (err as any)?.status,
+      cause: err?.cause,
+      model: modelName,
+      hasKey: Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY),
+    });
+    throw new Error(
+      `Gemini error: ${err?.message ?? "unknown"} (model: ${modelName}). Check GOOGLE_GENERATIVE_AI_API_KEY and model name.`
+    );
+  }
 }
 
 /**
