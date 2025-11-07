@@ -38,7 +38,7 @@ const randomId = () =>
  * Chat-driven control panel for authoring Gemini layout prompts.
  */
 export default function ChatPanel() {
-	const { messages, setMessages } = useChat();
+    const { messages, setMessages } = useChat();
 	const [description, setDescription] = useState<string>("");
 	const [style, setStyle] = useState<string>("cozy");
 	const [temperature, setTemperature] = useState<number>(0.2);
@@ -98,12 +98,20 @@ export default function ChatPanel() {
 		if (style) payload.style = style;
 
 		try {
-			const response = await fetch("/api/generate", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify(payload),
-			});
-			const json = (await response.json()) as APIResponse<LayoutResponse>;
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const contentType = response.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        const text = await response.text();
+        const snippet = text.slice(0, 200);
+        throw new Error(
+          `Server returned non-JSON (${response.status}). Snippet: ${snippet}`
+        );
+      }
+      const json = (await response.json()) as APIResponse<LayoutResponse>;
 
 			if (!response.ok || !json.ok || !json.data) {
 				throw new Error(
@@ -179,16 +187,15 @@ export default function ChatPanel() {
 								<SelectTrigger className="border-white/10 bg-white/10 text-slate-100">
 									<SelectValue placeholder="Choose style" />
 								</SelectTrigger>
-								<SelectContent className="bg-slate-900 text-slate-100">
-									{styleOptions.map((option) => (
-										<SelectItem
-											key={option.value || "none"}
-											value={option.value}
-										>
-											{option.label}
-										</SelectItem>
-									))}
-								</SelectContent>
+                <SelectContent className="bg-slate-900 text-slate-100">
+                  {styleOptions
+                    .filter((opt) => opt.value !== "")
+                    .map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
 							</Select>
 						</div>
 
