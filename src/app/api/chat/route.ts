@@ -77,13 +77,30 @@ export async function POST(req: NextRequest): Promise<Response> {
       candidates.slice(0, 5).map((m) => ({ path: m.path, tags: (m.tags || []).slice(0, 3) }))
     );
 
-    const systemPrompt = buildSystemPrompt(candidates, previousLayout ?? undefined);
+    // Build a rich system prompt tailored to this app and include a compact
+    // candidate catalog and full models manifest for reference.
+    const candidateCatalog = buildCandidateCatalog(models, candidates);
+    const fullModelsJson = serializeModelsJson(models);
+    const systemPrompt = buildRoomDesignerPrompt({
+      candidateCatalog,
+      userDescription: description,
+      style,
+      previousLayout: previousLayout ?? null,
+      modelsJson: fullModelsJson,
+    });
     console.debug("[api/chat] system_prompt_chars=%d", systemPrompt.length);
 
-    const raw = await callGemini(descriptionWithStyle, candidates, temperature);
+    const raw = await callGemini(
+      descriptionWithStyle,
+      candidates,
+      temperature,
+      systemPrompt
+    );
     console.debug("[api/chat] raw_chars=%d", raw.length);
     console.debug("[api/chat] raw_snippet", raw.slice(0, RAW_SNIPPET_LIMIT));
-    const parsed = safeParseLayout(raw);
+    let parsed = safeParseLayout(raw);
+    // Normalize common variations (e.g., model_id, position arrays, rotation number)
+    parsed = normalizeLayout(parsed, models);
 
     // Clamp positions, snap to grid, and resolve overlaps before returning.
     const clean = sanitizeLayout(parsed, {
@@ -156,6 +173,79 @@ function safeParseLayout(raw: string): LayoutResponse {
   }
 }
 
+/**
+ * Attempts to coerce common LLM variants into our LayoutResponse schema.
+ */
+function normalizeLayout(input: LayoutResponse, models: ModelsJson): LayoutResponse {
+  const out: LayoutResponse = {
+    room: input.room ?? { width_m: 4, depth_m: 3.5, height_m: 2.7 },
+    objects: Array.isArray(input.objects) ? [...input.objects] : [],
+    rationale: input.rationale,
+  };
+
+  const findKeyByPath = (p: string): string | undefined => {
+    for (const [k, v] of Object.entries(models)) {
+      if (v.path === p) return k;
+    }
+    return undefined;
+  };
+
+  out.objects = out.objects.map((obj, idx) => {
+    const copy: any = { ...obj };
+
+    // Model normalization: prefer obj.model (gltf:<key>)
+    if (!copy.model) {
+      const modelId: unknown = (obj as any).model_id ?? (obj as any).modelId;
+      const path: unknown = (obj as any).path;
+      if (typeof modelId === "string") {
+        // Extract the last segment after ':' e.g., 'models:gaming-room:chair' -> 'chair'
+        const segs = modelId.split(":");
+        const last = segs[segs.length - 1];
+        if (last) copy.model = `gltf:${last}`;
+      } else if (typeof path === "string" && path.startsWith("/models/")) {
+        const key = findKeyByPath(path);
+        if (key) copy.model = `gltf:${key}`;
+      }
+    }
+
+    // Position normalization
+    if (!copy.position_m) {
+      const p: unknown = (obj as any).position ?? (obj as any).pos;
+      if (Array.isArray(p) && p.length >= 3) {
+        copy.position_m = { x: Number(p[0]) || 0, y: Number(p[1]) || 0, z: Number(p[2]) || 0 };
+      } else if (p && typeof p === "object") {
+        const o = p as any;
+        if (typeof o.x === "number" || typeof o.y === "number" || typeof o.z === "number") {
+          copy.position_m = { x: o.x ?? 0, y: o.y ?? 0, z: o.z ?? 0 };
+        }
+      }
+    }
+
+    // Rotation normalization
+    if (!copy.rotation_deg) {
+      const r: unknown = (obj as any).rotation;
+      if (typeof r === "number") {
+        copy.rotation_deg = { y: r };
+      } else if (Array.isArray(r) && r.length >= 3) {
+        copy.rotation_deg = { x: Number(r[0]) || 0, y: Number(r[1]) || 0, z: Number(r[2]) || 0 };
+      } else if (r && typeof r === "object") {
+        const o = r as any;
+        const x = typeof o.x === "number" ? o.x : undefined;
+        const y = typeof o.y === "number" ? o.y : undefined;
+        const z = typeof o.z === "number" ? o.z : undefined;
+        if (x != null || y != null || z != null) copy.rotation_deg = { x, y, z };
+      }
+    }
+
+    // Ensure an id exists for stability
+    if (!copy.id) copy.id = obj.id ?? `obj_${idx + 1}`;
+
+    return copy;
+  });
+
+  return out;
+}
+
 type SanitizeOptions = {
   snap: number;
   roomFallback: LayoutResponse["room"];
@@ -208,6 +298,122 @@ function sanitizeLayout(layout: LayoutResponse, options: SanitizeOptions): Layou
     room,
     objects: sanitizedObjects,
   };
+}
+
+/**
+ * Formats top-K candidate lines for the catalog block.
+ */
+function buildCandidateCatalog(models: ModelsJson, candidates: Array<ReturnType<typeof getTopKModels>[number]>) {
+  const findKeyForMeta = (meta: unknown): string | undefined => {
+    for (const [key, m] of Object.entries(models)) {
+      if (m === meta || m.path === (meta as any)?.path) return key;
+    }
+    return undefined;
+  };
+
+  const lines = candidates.map((m) => {
+    const key = findKeyForMeta(m) ?? "unknown";
+    const anchors = Object.entries(m.anchors ?? {})
+      .slice(0, 4)
+      .map(([name, v]) => `${name}(${v.x},${v.y},${v.z})`)
+      .join(" ") || "none";
+    const tags = (m.tags ?? []).slice(0, 6).join(", ");
+    return `${key} | path:${m.path} | w:${m.w.toFixed(3)} d:${m.d.toFixed(3)} h:${m.h.toFixed(3)} | anchors: ${anchors} | tags: ${tags}`;
+  });
+  return lines.join("\n");
+}
+
+/**
+ * Serializes the full models manifest for inclusion in the system prompt.
+ * If serialization fails, returns an empty JSON object string.
+ */
+function serializeModelsJson(models: ModelsJson): string {
+  try {
+    return JSON.stringify(models, null, 2);
+  } catch (err) {
+    console.warn("[api/chat] Failed to serialize models.json for prompt:", err);
+    return "{}";
+  }
+}
+
+/**
+ * Creates the system prompt using the provided template and app context.
+ */
+function buildRoomDesignerPrompt(args: {
+  candidateCatalog: string;
+  userDescription: string;
+  style: string | null;
+  previousLayout: LayoutResponse | null;
+  modelsJson: string;
+}) {
+  const { candidateCatalog, userDescription, style, previousLayout, modelsJson } = args;
+  const prev = previousLayout ? JSON.stringify(previousLayout, null, 2) : "(none)";
+  return [
+    "You are RoomLayoutDesigner, an LLM that designs simple 3D room layouts using a small catalog of low-poly GLB assets.",
+    "Output must be a single, valid JSON object that matches the schema below—no prose, no markdown, no code fences.",
+    "Units are meters for distances and degrees for rotations.",
+    "Only use models from the candidate catalog provided below.",
+    "",
+    "Your role",
+    "- Read the user’s description and (optionally) a previous layout.",
+    "- Select appropriate models only from the provided catalog.",
+    "- Place them inside the room without overlaps, respecting model dimensions.",
+    "- Return one JSON object that conforms to the LayoutResponse schema.",
+    "",
+    "Catalog (you MUST use only these)",
+    "Below is a compact catalog extracted from models.json.",
+    "Each entry provides the key you must reference (via model: \"gltf:<key>\"), plus dimensions and path.",
+    "If you need an item that isn’t in this list, choose the closest match from this list instead of inventing a new one.",
+    "",
+    candidateCatalog,
+    "",
+    "Full models.json manifest (for reference only — do not echo it back; use it to select correct keys and dimensions):",
+    modelsJson,
+    "",
+    "Catalog line format (example):",
+    "desk_basic | path:/models/lowpoly-room/desk_basic.glb | w:1.600 d:0.700 h:0.750 | anchors: top_center(0,0.75,0) | tags: desk,wood,basic",
+    "",
+    "Inputs",
+    `User description: ${userDescription}`,
+    `Style hint (optional): ${style ?? "(none)"}`,
+    "Previous layout (optional, same schema as output):",
+    prev,
+    "",
+    "Rules (follow strictly)",
+    "- Schema only. Return exactly one JSON object that matches LayoutResponse (see “Schema” below). No extra keys, no comments, no text.",
+    "- Models from catalog only. Every placed object that uses a GLB must set model: \"gltf:<key>\". Do not write file paths in model; the renderer resolves paths using the catalog.",
+    "- Coordinate system: origin is the room center; X is left/right, Z is forward/back, Y is up. Room bounds along X are ±(width_m/2), along Z are ±(depth_m/2).",
+    "- Dimensions & placement: Use catalog w,d,h (meters). Objects must be fully inside the room. Keep at least 0.2m walkway margin between objects (edge-to-edge) and 0.05m from walls.",
+    "- Grid snap: Round X and Z to the nearest 0.1m.",
+    "- Floor contact: For floor-standing furniture do NOT set position_m.y (omit it). The renderer will set y = h/2 so it rests on the floor. Only set y for stacked/anchored items.",
+    "- Rotation: rotation_deg is in degrees. Prefer Y-axis rotations; keep X/Z at 0 unless specifically requested.",
+    "- Anchors (optional): you may use parent/relative_position_m/anchor if available; otherwise place directly.",
+    "- Creativity within constraints: match style using tags; if unsure, pick fewer objects and keep room clean.",
+    "- Edits mode: if previous layout provided, modify minimally; keep IDs stable where possible.",
+    "- Rationale: include a short rationale string explaining key placement choices (1–3 sentences).",
+    "",
+    "Placement heuristics (guidance, not mandatory):",
+    "- Beds typically go with the headboard against a wall; leave ~0.6–0.9m clearance on at least one long side.",
+    "- Desks align to a wall; keep ~0.6m chair clearance behind.",
+    "- Wardrobes/closets go against walls; avoid blocking desk/bed access.",
+    "- Side tables/nightstands sit near bed edges with ~0.05–0.1m gap.",
+    "",
+    "Schema (return exactly this shape)",
+    "{",
+    "  \"room\": { \"width_m\": 4.0, \"depth_m\": 3.5, \"height_m\": 2.7, \"floor_material\": \"light_wood\", \"wall_color\": \"soft_white\" },",
+    "  \"objects\": [",
+    "    { \"id\": \"desk1\", \"type\": \"desk\", \"label\": \"work desk\", \"model\": \"gltf:desk_basic\", \"position_m\": { \"x\": -0.8, \"y\": 0.375, \"z\": 0.0 }, \"rotation_deg\": { \"y\": 0 } }",
+    "  ],",
+    "  \"rationale\": \"Why these models and placements.\"",
+    "}",
+    "",
+    "Field notes",
+    "- room.*: use defaults width 4.0, depth 3.5, height 2.7 if unspecified.",
+    "- objects[].model: must be \"gltf:<key>\" from the catalog (no paths in output).",
+    "- objects[].position_m: meters; if omitted and on floor, renderer defaults y = h/2.",
+    "- objects[].rotation_deg: degrees; typically { \"y\": 0..360 }.",
+    "- objects[].construction: optional primitive recipe if no GLB matches (prefer GLB when available).",
+  ].join("\n");
 }
 
 /**

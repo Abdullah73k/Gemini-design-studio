@@ -119,16 +119,20 @@ export default function ChatPanel() {
 				);
 			}
 
-			const pretty = JSON.stringify(json.data, null, 2);
-			setMessages((prev) => [
-				...prev,
-				{
-					id: randomId(),
-					role: "assistant",
-					parts: [{ type: "text", text: pretty }],
-				} as unknown as (typeof prev)[number],
-			]);
-			setLastLayout(json.data);
+      const pretty = JSON.stringify(json.data, null, 2);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: randomId(),
+          role: "assistant",
+          parts: [{ type: "text", text: pretty }],
+        } as unknown as (typeof prev)[number],
+      ]);
+      setLastLayout(json.data);
+      // Dispatch event so the 3D viewer updates.
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("layout:update", { detail: json.data }));
+      }
 		} catch (err) {
 			const message =
 				err instanceof Error

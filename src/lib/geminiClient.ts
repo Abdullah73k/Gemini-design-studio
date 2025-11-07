@@ -63,11 +63,12 @@ export function buildSystemPrompt(
  * @returns Raw string response from Gemini (expected JSON per LayoutResponse schema).
  */
 export async function callGemini(
-	userPrompt: string,
-	candidates: ModelMeta[],
-	temperature: number = DEFAULT_TEMPERATURE
+  userPrompt: string,
+  candidates: ModelMeta[],
+  temperature: number = DEFAULT_TEMPERATURE,
+  systemPromptOverride?: string
 ): Promise<string> {
-	const systemPrompt = buildSystemPrompt(candidates);
+  const systemPrompt = systemPromptOverride ?? buildSystemPrompt(candidates);
 	const modelName = process.env.GEMINI_MODEL ?? DEFAULT_MODEL;
 
 	try {
