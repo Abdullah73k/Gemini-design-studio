@@ -6,7 +6,7 @@
 
 
 ## Hackathon Context
-Built at **DeltaHacks Lite** in ~**1.5 hours**. The focus was a working end‑to‑end pipeline for “Best use of Gemini”: natural‑language room descriptions → strict JSON layout → live 3D scene.
+Built at **DeltaHacks Lite** in ~**1.5 hours**. The focus was a working end‑to‑end pipeline for “Best use of Gemini”
 
 ## What It Does
 - You describe a room (style, furniture, vibe).
